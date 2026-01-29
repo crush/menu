@@ -21,17 +21,31 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
     var config = Config.load()
     var mode: Mode = .apps
     var apps: [URL] = []
+    var appNames: [URL: String] = [:]
     var files: [URL] = []
+    var folders: [URL] = []
     var items: [URL] = []
     var selected = 0
 
-    var bg: NSColor { let c = config.color(config.bg); return NSColor(red: c.r, green: c.g, blue: c.b, alpha: 1) }
-    var fg: NSColor { let c = config.color(config.fg); return NSColor(red: c.r, green: c.g, blue: c.b, alpha: 1) }
-    var hi: NSColor { let c = config.color(config.hi); return NSColor(red: c.r, green: c.g, blue: c.b, alpha: 1) }
-    var promptColor: NSColor { let c = config.color(config.prompt); return NSColor(red: c.r, green: c.g, blue: c.b, alpha: 1) }
+    var bgColor: NSColor!
+    var fgColor: NSColor!
+    var hiColor: NSColor!
+    var promptCol: NSColor!
+
+    func cacheColors() {
+        let b = config.color(config.bg)
+        let f = config.color(config.fg)
+        let h = config.color(config.hi)
+        let p = config.color(config.prompt)
+        bgColor = NSColor(red: b.r, green: b.g, blue: b.b, alpha: 1)
+        fgColor = NSColor(red: f.r, green: f.g, blue: f.b, alpha: 1)
+        hiColor = NSColor(red: h.r, green: h.g, blue: h.b, alpha: 1)
+        promptCol = NSColor(red: p.r, green: p.g, blue: p.b, alpha: 1)
+    }
     var themes: [Theme] = []
     var originalConfig: Config?
     var previousMode: Mode = .apps
+    var searchWork: DispatchWorkItem?
     var w: CGFloat { CGFloat(config.width) }
     var h: CGFloat = 28
     var p: CGFloat { CGFloat(config.padding) }
@@ -40,7 +54,9 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
 
     func applicationDidFinishLaunching(_ n: Notification) {
         if !Config.exists() { Config.create() }
+        cacheColors()
         loadApps()
+        loadFolders()
         setupWindow()
         setupHotkey()
         setupKeys()
@@ -59,7 +75,32 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
             guard let urls = try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: dir), includingPropertiesForKeys: nil) else { continue }
             apps.append(contentsOf: urls.filter { $0.pathExtension == "app" })
         }
-        apps.sort { name($0).lowercased() < name($1).lowercased() }
+        for app in apps {
+            appNames[app] = name(app).lowercased()
+        }
+        apps.sort { (appNames[$0] ?? "") < (appNames[$1] ?? "") }
+    }
+
+    func loadFolders() {
+        DispatchQueue.global(qos: .background).async { [weak self] in
+            guard let self = self else { return }
+            var result: [URL] = []
+            let skip = Set([".git", "node_modules", ".build", "Pods", "DerivedData", ".svn", "vendor", "Library", ".Trash", "Caches", "__pycache__", ".venv", "venv", ".npm", ".cache"])
+            let paths = self.config.folders.values.map { ($0 as NSString).expandingTildeInPath }
+            for path in paths {
+                let url = URL(fileURLWithPath: path)
+                guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { continue }
+                while let u = enumerator.nextObject() as? URL {
+                    let name = u.lastPathComponent
+                    if skip.contains(name) { enumerator.skipDescendants(); continue }
+                    guard u.hasDirectoryPath && u.pathExtension != "app" else { continue }
+                    result.append(u)
+                }
+            }
+            DispatchQueue.main.async {
+                self.folders = result
+            }
+        }
     }
 
     func name(_ url: URL) -> String { url.deletingPathExtension().lastPathComponent }
@@ -190,8 +231,9 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
     }
 
     func applyTheme() {
-        container.layer?.backgroundColor = bg.cgColor
-        prompt.textColor = promptColor
+        cacheColors()
+        container.layer?.backgroundColor = bgColor.cgColor
+        prompt.textColor = promptCol
         table.reloadData()
     }
 
@@ -236,7 +278,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
 
         container = NSView()
         container.wantsLayer = true
-        container.layer?.backgroundColor = bg.cgColor
+        container.layer?.backgroundColor = bgColor.cgColor
         container.layer?.cornerRadius = r
         container.layer?.masksToBounds = true
         window.contentView = container
@@ -246,7 +288,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
 
         prompt = NSTextField(labelWithString: ">")
         prompt.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
-        prompt.textColor = promptColor
+        prompt.textColor = promptCol
         prompt.frame = NSRect(x: p, y: 4, width: 14, height: 16)
         header.addSubview(prompt)
 
@@ -522,7 +564,16 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         } else {
             mode = .apps
             prompt.stringValue = ">"
-            items = q.isEmpty ? apps : apps.filter { fuzzy(q, name($0).lowercased()) }.sorted { score(q, name($0).lowercased()) > score(q, name($1).lowercased()) }
+            if q.isEmpty {
+                items = apps
+            } else {
+                let scored = apps.compactMap { url -> (URL, Int)? in
+                    guard let n = appNames[url] else { return nil }
+                    guard n.contains(q) || fuzzy(q, n) else { return nil }
+                    return (url, score(q, n))
+                }
+                items = scored.sorted { $0.1 > $1.1 }.map { $0.0 }
+            }
         }
 
         selected = 0
@@ -542,23 +593,14 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
 
     func searchFolders(_ query: String) {
         var results: [URL] = []
-        folderKeys = config.folders.keys.filter { fuzzy(query, $0.lowercased()) }.sorted { score(query, $0.lowercased()) > score(query, $1.lowercased()) }
+        folderKeys = config.folders.keys.filter { $0.lowercased().contains(query) }.sorted()
         for key in folderKeys {
             if let path = config.folders[key] {
                 results.append(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
             }
         }
-        let paths = config.folders.values.map { ($0 as NSString).expandingTildeInPath }
-        for path in paths {
-            let url = URL(fileURLWithPath: path)
-            if let urls = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey]) {
-                for u in urls where u.hasDirectoryPath && !u.lastPathComponent.hasPrefix(".") && u.pathExtension != "app" {
-                    if fuzzy(query, u.lastPathComponent.lowercased()) && !results.contains(u) {
-                        results.append(u)
-                    }
-                }
-            }
-        }
+        let matched = folders.filter { $0.lastPathComponent.lowercased().contains(query) }
+        results.append(contentsOf: matched.prefix(50))
         items = results
     }
 
@@ -600,12 +642,26 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
     func numberOfRows(in t: NSTableView) -> Int { itemCount() }
 
     func tableView(_ t: NSTableView, viewFor c: NSTableColumn?, row: Int) -> NSView? {
-        let sel = row == selected
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
-        if sel {
+        let id = NSUserInterfaceItemIdentifier("cell")
+        let v: NSTableCellView
+        if let reused = t.makeView(withIdentifier: id, owner: nil) as? NSTableCellView {
+            v = reused
+        } else {
+            v = NSTableCellView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+            v.identifier = id
             v.wantsLayer = true
-            v.layer?.backgroundColor = hi.cgColor
+            let l = NSTextField(labelWithString: "")
+            l.frame = NSRect(x: p, y: 6, width: w - p * 2, height: 16)
+            l.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+            l.isBordered = false
+            l.drawsBackground = false
+            l.isEditable = false
+            l.tag = 1
+            v.addSubview(l)
         }
+
+        let sel = row == selected
+        v.layer?.backgroundColor = sel ? hiColor.cgColor : nil
 
         var label: String
         if case .themes = mode {
@@ -614,24 +670,17 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
             let url = items[row]
             label = name(url)
             if case .folder(let n, _) = mode {
-                if n.isEmpty {
-                    if row < folderKeys.count {
-                        label = folderKeys[row]
-                    } else {
-                        label = "/" + label
-                    }
-                } else if url.hasDirectoryPath {
-                    label = "/" + label
+                if n.isEmpty && input.stringValue.isEmpty && row < folderKeys.count {
+                    label = folderKeys[row]
                 }
             }
             if case .files = mode, url.hasDirectoryPath { label = "/" + label }
         }
 
-        let l = NSTextField(labelWithString: label)
-        l.frame = NSRect(x: p, y: 6, width: w - p * 2, height: 16)
-        l.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        l.textColor = sel ? .white : fg
-        v.addSubview(l)
+        if let l = v.viewWithTag(1) as? NSTextField {
+            l.stringValue = label
+            l.textColor = sel ? .white : fgColor
+        }
         return v
     }
 }
