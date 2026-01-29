@@ -12,20 +12,28 @@
 
 > install?
 
-  curl -fsSL https://raw.githubusercontent.com/crush/menu/main/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/crush/menu/main/i | sh
 
-> usage?
+> keys?
 
-  ctrl+space     open launcher
-  type           filter apps
-  enter          open selected
+  ctrl+space     open
+  /              folder mode
+  >              back to apps
+  :theme         switch theme
+  :setup         edit config
+  :reload        reload config
+  f query        file search
 
-> pipe mode?
+> themes?
 
-  ls | menu              select from list
-  find . | menu | xargs  chain commands
+  dark · nord · dracula · gruvbox
+  catppuccin · solarized · monokai · tokyo
+
+> config?
+
+  ~/.config/menu/config
 
 > uninstall?
 
-  curl -fsSL https://raw.githubusercontent.com/crush/menu/main/uninstall.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/crush/menu/main/u | sh
 ```
