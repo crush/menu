@@ -8,14 +8,13 @@ class Panel: NSPanel {
 
 enum Mode { case apps, files, folder(String, String), themes }
 
-class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
+class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var window: Panel!
     var container: NSView!
     var prompt: NSTextField!
     var input: NSTextField!
     var count: NSTextField!
-    var scroll: NSScrollView!
-    var table: NSTableView!
+    var list: ListView!
     var monitor: Any?
 
     var config = Config.load()
@@ -36,11 +35,35 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         let b = config.color(config.bg)
         let f = config.color(config.fg)
         let h = config.color(config.hi)
-        let p = config.color(config.prompt)
+        let pc = config.color(config.prompt)
         bgColor = NSColor(red: b.r, green: b.g, blue: b.b, alpha: 1)
         fgColor = NSColor(red: f.r, green: f.g, blue: f.b, alpha: 1)
         hiColor = NSColor(red: h.r, green: h.g, blue: h.b, alpha: 1)
-        promptCol = NSColor(red: p.r, green: p.g, blue: p.b, alpha: 1)
+        promptCol = NSColor(red: pc.r, green: pc.g, blue: pc.b, alpha: 1)
+    }
+
+    var savedTheme: String = ""
+
+    func updateList() {
+        var labels: [String] = []
+        if case .themes = mode {
+            labels = themes.map { t in
+                t.name.lowercased() == savedTheme.lowercased() ? "* " + t.name : "  " + t.name
+            }
+        } else {
+            for (i, url) in items.enumerated() {
+                var label = name(url)
+                if case .folder(let n, _) = mode {
+                    if n.isEmpty && input.stringValue.isEmpty && i < folderKeys.count {
+                        label = folderKeys[i]
+                    }
+                }
+                if case .files = mode, url.hasDirectoryPath { label = "/" + label }
+                labels.append(label)
+            }
+        }
+        list.setItems(labels)
+        list.select(selected)
     }
     var themes: [Theme] = []
     var originalConfig: Config?
@@ -194,7 +217,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         items = apps
         folderKeys = []
         selected = 0
-        table.reloadData()
+        updateList()
         count.stringValue = "\(items.count)"
         resize()
     }
@@ -210,7 +233,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
             return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         }
         selected = 0
-        table.reloadData()
+        updateList()
         count.stringValue = "\(items.count)"
         resize()
     }
@@ -218,14 +241,15 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
     func switchThemes() {
         originalConfig = config
         previousMode = mode
+        savedTheme = config.theme
         mode = .themes
         prompt.stringValue = ":"
         input.stringValue = ""
         input.placeholderString = "select theme"
         themes = Theme.all()
         items = []
-        selected = 0
-        table.reloadData()
+        selected = themes.firstIndex { $0.name.lowercased() == savedTheme.lowercased() } ?? 0
+        updateList()
         count.stringValue = "\(themes.count)"
         resize()
     }
@@ -234,7 +258,8 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         cacheColors()
         container.layer?.backgroundColor = bgColor.cgColor
         prompt.textColor = promptCol
-        table.reloadData()
+        list?.updateColors(bg: bgColor, fg: fgColor, hi: hiColor)
+        updateList()
     }
 
     func restoreConfig() {
@@ -258,7 +283,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
                 input.placeholderString = nil
                 loadFolder(p, query: "")
                 selected = 0
-                table.reloadData()
+                updateList()
                 count.stringValue = "\(items.count)"
                 resize()
             }
@@ -309,68 +334,37 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         count.frame = NSRect(x: w - 44 - p, y: 5, width: 44, height: 14)
         header.addSubview(count)
 
-        table = NSTableView()
-        table.backgroundColor = .clear
-        table.headerView = nil
-        table.rowHeight = h
-        table.intercellSpacing = .zero
-        table.selectionHighlightStyle = .none
-        table.focusRingType = .none
-        table.target = self
-        table.action = #selector(clicked)
-        table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("n")))
-        table.tableColumns[0].width = w
-        table.dataSource = self
-        table.delegate = self
-
-        scroll = NSScrollView()
-        scroll.documentView = table
-        scroll.hasVerticalScroller = false
-        scroll.drawsBackground = false
-        scroll.automaticallyAdjustsContentInsets = false
-        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 12, right: 0)
-        container.addSubview(scroll)
-
-        NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] e in
-            self?.handleMouse(e)
-            return e
+        list = ListView(frame: .zero)
+        list.rowHeight = h
+        list.padding = p
+        list.maxVisible = maxrows
+        list.updateColors(bg: bgColor, fg: fgColor, hi: hiColor)
+        list.onClick = { [weak self] index in
+            self?.selected = index
+            self?.launch()
         }
-
-        header.frame = NSRect(x: 0, y: CGFloat(maxrows) * h, width: w, height: h)
-    }
-
-    @objc func clicked() {
-        if table.clickedRow >= 0 && table.clickedRow < itemCount() {
-            selected = table.clickedRow
-            launch()
-        }
-    }
-
-    func handleMouse(_ event: NSEvent) {
-        guard window.isVisible else { return }
-        let loc = scroll.convert(event.locationInWindow, from: nil)
-        let tableLoc = table.convert(loc, from: scroll)
-        let row = table.row(at: tableLoc)
-        if row >= 0 && row < itemCount() && row != selected {
-            selected = row
-            table.reloadData()
-            if case .themes = mode, selected < themes.count {
-                let theme = themes[selected]
-                config.bg = theme.bg
-                config.fg = theme.fg
-                config.hi = theme.hi
-                config.prompt = theme.prompt
-                applyTheme()
+        list.onHover = { [weak self] index in
+            guard let self = self else { return }
+            self.selected = index
+            if case .themes = self.mode, index < self.themes.count {
+                let theme = self.themes[index]
+                self.config.bg = theme.bg
+                self.config.fg = theme.fg
+                self.config.hi = theme.hi
+                self.config.prompt = theme.prompt
+                self.applyTheme()
             }
         }
+        container.addSubview(list)
+
+        header.frame = NSRect(x: 0, y: CGFloat(maxrows) * h, width: w, height: h)
     }
 
     func move(_ d: Int) {
         let total = itemCount()
         guard total > 0 else { return }
         selected = max(0, min(selected + d, total - 1))
-        table.reloadData()
-        table.scrollRowToVisible(selected)
+        list.moveSelection(d)
         if case .themes = mode, selected < themes.count {
             let theme = themes[selected]
             config.bg = theme.bg
@@ -404,7 +398,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         items = apps
         selected = 0
         prompt.stringValue = ">"
-        table.reloadData()
+        updateList()
         count.stringValue = "\(items.count)"
         resize()
 
@@ -444,10 +438,10 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
     func resize() {
         let rows = min(itemCount(), maxrows)
         let lh = CGFloat(rows) * h
-        let inset: CGFloat = 12
-        let total = h + lh + inset
-        container.subviews[0].frame = NSRect(x: 0, y: lh + inset, width: w, height: h)
-        scroll.frame = NSRect(x: 0, y: 0, width: w, height: lh + inset)
+        let total = h + lh
+        container.subviews[0].frame = NSRect(x: 0, y: lh, width: w, height: h)
+        list.frame = NSRect(x: 0, y: 0, width: w, height: lh)
+        list.maxVisible = rows
         window.setContentSize(NSSize(width: w, height: total))
         window.invalidateShadow()
     }
@@ -477,7 +471,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
                     input.placeholderString = nil
                     loadFolder(expanded, query: "")
                     selected = 0
-                    table.reloadData()
+                    updateList()
                     count.stringValue = "\(items.count)"
                     resize()
                     return
@@ -490,7 +484,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
                 input.placeholderString = nil
                 loadFolder(url.path, query: "")
                 selected = 0
-                table.reloadData()
+                updateList()
                 count.stringValue = "\(items.count)"
                 resize()
                 return
@@ -536,7 +530,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         if case .themes = mode {
             themes = q.isEmpty ? Theme.all() : Theme.all().filter { fuzzy(q, $0.name.lowercased()) }
             selected = 0
-            table.reloadData()
+            updateList()
             count.stringValue = "\(themes.count)"
             resize()
             return
@@ -577,7 +571,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         }
 
         selected = 0
-        table.reloadData()
+        updateList()
         count.stringValue = "\(items.count)"
         resize()
     }
@@ -639,50 +633,6 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         return s
     }
 
-    func numberOfRows(in t: NSTableView) -> Int { itemCount() }
-
-    func tableView(_ t: NSTableView, viewFor c: NSTableColumn?, row: Int) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("cell")
-        let v: NSTableCellView
-        if let reused = t.makeView(withIdentifier: id, owner: nil) as? NSTableCellView {
-            v = reused
-        } else {
-            v = NSTableCellView(frame: NSRect(x: 0, y: 0, width: w, height: h))
-            v.identifier = id
-            v.wantsLayer = true
-            let l = NSTextField(labelWithString: "")
-            l.frame = NSRect(x: p, y: 6, width: w - p * 2, height: 16)
-            l.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-            l.isBordered = false
-            l.drawsBackground = false
-            l.isEditable = false
-            l.tag = 1
-            v.addSubview(l)
-        }
-
-        let sel = row == selected
-        v.layer?.backgroundColor = sel ? hiColor.cgColor : nil
-
-        var label: String
-        if case .themes = mode {
-            label = themes[row].name
-        } else {
-            let url = items[row]
-            label = name(url)
-            if case .folder(let n, _) = mode {
-                if n.isEmpty && input.stringValue.isEmpty && row < folderKeys.count {
-                    label = folderKeys[row]
-                }
-            }
-            if case .files = mode, url.hasDirectoryPath { label = "/" + label }
-        }
-
-        if let l = v.viewWithTag(1) as? NSTextField {
-            l.stringValue = label
-            l.textColor = sel ? .white : fgColor
-        }
-        return v
-    }
 }
 
 let app = NSApplication.shared
