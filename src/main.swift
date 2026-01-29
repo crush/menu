@@ -29,7 +29,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
     var fg: NSColor { let c = config.color(config.fg); return NSColor(red: c.r, green: c.g, blue: c.b, alpha: 1) }
     var hi: NSColor { let c = config.color(config.hi); return NSColor(red: c.r, green: c.g, blue: c.b, alpha: 1) }
     var w: CGFloat { CGFloat(config.width) }
-    var h: CGFloat = 24
+    var h: CGFloat = 28
     var p: CGFloat { CGFloat(config.padding) }
     var r: CGFloat { CGFloat(config.radius) }
     var maxrows: Int { config.rows }
@@ -71,6 +71,8 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), nil)
     }
 
+    var folderKeys: [String] = []
+
     func setupKeys() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             guard let self = self, self.window.isVisible else { return e }
@@ -80,9 +82,62 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
             case 126: self.move(-1); return nil
             case 36, 76: self.launch(); return nil
             case 48: self.complete(); return nil
+            case 51:
+                if self.input.stringValue.isEmpty {
+                    if case .folder = self.mode {
+                        self.switchApps()
+                        return nil
+                    }
+                }
+                return e
+            case 44:
+                if e.characters == "/" {
+                    if case .apps = self.mode, self.input.stringValue.isEmpty {
+                        self.switchFolder()
+                        return nil
+                    }
+                }
+                return e
+            case 47:
+                if e.characters == ">" {
+                    if case .folder(let name, _) = self.mode, name.isEmpty, self.input.stringValue.isEmpty {
+                        self.switchApps()
+                        return nil
+                    }
+                }
+                return e
             default: return e
             }
         }
+    }
+
+    func switchApps() {
+        mode = .apps
+        prompt.stringValue = ">"
+        input.stringValue = ""
+        input.placeholderString = nil
+        items = apps
+        folderKeys = []
+        selected = 0
+        table.reloadData()
+        count.stringValue = "\(items.count)"
+        resize()
+    }
+
+    func switchFolder() {
+        mode = .folder("", "")
+        prompt.stringValue = "/"
+        input.stringValue = ""
+        input.placeholderString = "search folders"
+        folderKeys = config.folders.keys.sorted()
+        items = folderKeys.compactMap { key in
+            guard let path = config.folders[key] else { return nil }
+            return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        }
+        selected = 0
+        table.reloadData()
+        count.stringValue = "\(items.count)"
+        resize()
     }
 
     func setupWindow() {
@@ -216,9 +271,10 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
     func resize() {
         let rows = min(items.count, maxrows)
         let lh = CGFloat(rows) * h
-        let total = h + lh
-        container.subviews[0].frame = NSRect(x: 0, y: lh, width: w, height: h)
-        scroll.frame = NSRect(x: 0, y: 0, width: w, height: lh)
+        let pad: CGFloat = rows < 3 ? r : 0
+        let total = h + lh + pad
+        container.subviews[0].frame = NSRect(x: 0, y: lh + pad, width: w, height: h)
+        scroll.frame = NSRect(x: 0, y: pad, width: w, height: lh)
         window.setContentSize(NSSize(width: w, height: total))
         window.invalidateShadow()
     }
@@ -226,6 +282,38 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
     @objc func launch() {
         guard selected >= 0, selected < items.count else { return }
         let url = items[selected]
+
+        if case .folder(let name, _) = mode, name.isEmpty {
+            if selected < folderKeys.count {
+                let key = folderKeys[selected]
+                if let path = config.folders[key] {
+                    let expanded = (path as NSString).expandingTildeInPath
+                    mode = .folder(key, expanded)
+                    prompt.stringValue = "/" + key
+                    input.stringValue = ""
+                    input.placeholderString = nil
+                    loadFolder(expanded, query: "")
+                    selected = 0
+                    table.reloadData()
+                    count.stringValue = "\(items.count)"
+                    resize()
+                    return
+                }
+            } else if url.hasDirectoryPath {
+                let folderName = url.lastPathComponent
+                mode = .folder(folderName, url.path)
+                prompt.stringValue = "/" + folderName
+                input.stringValue = ""
+                input.placeholderString = nil
+                loadFolder(url.path, query: "")
+                selected = 0
+                table.reloadData()
+                count.stringValue = "\(items.count)"
+                resize()
+                return
+            }
+        }
+
         if url.hasDirectoryPath {
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.path)
         } else {
@@ -256,24 +344,19 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
             return
         }
 
-        if q.hasPrefix("/") {
-            let parts = q.dropFirst().split(separator: "/", maxSplits: 1)
-            let folder = String(parts[0])
-            let sub = parts.count > 1 ? String(parts[1]) : ""
-
-            if let path = config.folders[folder] {
-                let expanded = (path as NSString).expandingTildeInPath
-                mode = .folder(folder, expanded)
-                prompt.stringValue = "/" + folder
-                loadFolder(expanded, query: sub)
-            } else {
-                let matches = config.folders.keys.filter { $0.hasPrefix(folder) }
-                mode = .apps
-                prompt.stringValue = "/"
-                items = matches.compactMap { key in
-                    guard let path = config.folders[key] else { return nil }
-                    return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        if case .folder(let name, let path) = mode {
+            if name.isEmpty {
+                if q.isEmpty {
+                    folderKeys = config.folders.keys.sorted()
+                    items = folderKeys.compactMap { key in
+                        guard let p = config.folders[key] else { return nil }
+                        return URL(fileURLWithPath: (p as NSString).expandingTildeInPath)
+                    }
+                } else {
+                    searchFolders(q)
                 }
+            } else {
+                loadFolder(path, query: q)
             }
         } else if q.hasPrefix("f ") {
             let query = String(q.dropFirst(2))
@@ -299,6 +382,23 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
         }
         let sorted = urls.filter { !$0.lastPathComponent.hasPrefix(".") }.sorted { name($0).lowercased() < name($1).lowercased() }
         items = query.isEmpty ? sorted : sorted.filter { fuzzy(query, name($0).lowercased()) }.sorted { score(query, name($0).lowercased()) > score(query, name($1).lowercased()) }
+    }
+
+    func searchFolders(_ query: String) {
+        var results: [URL] = []
+        folderKeys = []
+        let paths = config.folders.values.map { ($0 as NSString).expandingTildeInPath }
+        for path in paths {
+            let url = URL(fileURLWithPath: path)
+            if let urls = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey]) {
+                for u in urls where u.hasDirectoryPath && !u.lastPathComponent.hasPrefix(".") && u.pathExtension != "app" {
+                    if fuzzy(query, u.lastPathComponent.lowercased()) {
+                        results.append(u)
+                    }
+                }
+            }
+        }
+        items = results.sorted { score(query, $0.lastPathComponent.lowercased()) > score(query, $1.lastPathComponent.lowercased()) }
     }
 
     func searchFiles(_ query: String) {
@@ -341,15 +441,26 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTableView
     func tableView(_ t: NSTableView, viewFor c: NSTableColumn?, row: Int) -> NSView? {
         let sel = row == selected
         let url = items[row]
-        let isDir = url.hasDirectoryPath
         let v = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
         if sel {
             v.wantsLayer = true
             v.layer?.backgroundColor = hi.cgColor
         }
-        let prefix = isDir ? "/" : ""
-        let l = NSTextField(labelWithString: prefix + name(url))
-        l.frame = NSRect(x: p, y: 4, width: w - p * 2, height: 16)
+        var label = name(url)
+        if case .folder(let n, _) = mode {
+            if n.isEmpty {
+                if row < folderKeys.count {
+                    label = folderKeys[row]
+                } else {
+                    label = "/" + label
+                }
+            } else if url.hasDirectoryPath {
+                label = "/" + label
+            }
+        }
+        if case .files = mode, url.hasDirectoryPath { label = "/" + label }
+        let l = NSTextField(labelWithString: label)
+        l.frame = NSRect(x: p, y: 6, width: w - p * 2, height: 16)
         l.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         l.textColor = sel ? .white : fg
         v.addSubview(l)
