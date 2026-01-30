@@ -594,7 +594,7 @@ class Handler: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             }
         }
         let matched = folders.filter { $0.lastPathComponent.lowercased().contains(query) }
-        results.append(contentsOf: matched.prefix(50))
+        results.append(contentsOf: matched.prefix(10))
         items = results
     }
 
